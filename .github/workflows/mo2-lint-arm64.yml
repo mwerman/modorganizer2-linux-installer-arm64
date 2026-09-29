@@ -12,6 +12,8 @@ jobs:
   build:
     name: Build AppImage and Flatpak (aarch64)
     runs-on: ubuntu-24.04-arm
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -19,69 +21,32 @@ jobs:
           ref: ${{ inputs.ref }}
           path: mo2
       - uses: astral-sh/setup-uv@v5
-      - run: sudo apt-get update && sudo apt-get install -y flatpak flatpak-builder curl file
+      - run: sudo apt-get update && sudo apt-get install -y make flatpak flatpak-builder curl file
 
-      - name: Build shared app directory
+      - name: Fetch prebuilt Windows redirector (best effort)
+        run: |
+          mkdir -p mo2/dist
+          TAG="$(gh release list --repo Furglitch/modorganizer2-linux-installer --limit 1 --json tagName -q '.[0].tagName' || true)"
+          echo "Latest release tag: $TAG"
+          if [ -n "$TAG" ]; then
+            gh release download "$TAG" --repo Furglitch/modorganizer2-linux-installer --pattern '*redirector*' --dir mo2/dist || echo "WARNING: no redirector asset found"
+          fi
+          ls -la mo2/dist
+
+      - name: Build mo2-lint with PyInstaller (native arm64)
         run: |
           set -e
-          PYV="$(tr -d '[:space:]' < mo2/.python-version 2>/dev/null || true)"
-          PYV="${PYV:-3.12}"
-          uv python install "$PYV"
-          PY="$(uv python find "$PYV")"
-          PYROOT="$(dirname "$(dirname "$(readlink -f "$PY")")")"
-          mkdir -p AppDir/usr/bin
-          cp -a "$PYROOT" AppDir/usr/python
-          uv pip install --python AppDir/usr/python/bin/python3 --break-system-packages ./mo2
-          cat > detect.py <<'EOF'
-          import sys
-          from importlib.metadata import distribution
-          d = distribution("modorganizer2-linux-installer")
-          files = list(d.files or [])
-          scripts = [e.name for e in d.entry_points if e.group == "console_scripts"]
-          if scripts:
-              print("script:" + ("mo2-lint" if "mo2-lint" in scripts else scripts[0]))
-              sys.exit(0)
-          tops = sorted({f.parts[0] for f in files if len(f.parts) > 1 and not f.parts[0].endswith((".dist-info", ".data")) and f.parts[0] != "__pycache__"})
-          for t in tops:
-              if any(f.parts[:2] == (t, "__main__.py") for f in files):
-                  print("module:" + t)
-                  sys.exit(0)
-          print("installed top-level dirs: %s" % tops, file=sys.stderr)
-          sys.exit(1)
-          EOF
-          if ! AppDir/usr/python/bin/python3 detect.py > AppDir/usr/entry; then
-            echo "=== Could not find an entry point. Diagnostics: ==="
-            sed -n '1,100p' mo2/pyproject.toml || true
-            ls -la mo2 mo2/src mo2/build || true
-            sed -n '1,80p' mo2/Makefile || true
-            exit 1
-          fi
-          echo "Entry point: $(cat AppDir/usr/entry)"
-          cat > AppDir/usr/bin/mo2-lint <<'EOF'
-          #!/bin/bash
-          ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-          MODE="$(cat "$ROOT/entry")"
-          export MO2_KIND="${MODE%%:*}" MO2_TARGET="${MODE#*:}"
-          exec "$ROOT/python/bin/python3" -c 'import os,sys,runpy
-          k=os.environ["MO2_KIND"]
-          t=os.environ["MO2_TARGET"]
-          sys.argv[0]=t
-          if k=="module":
-              runpy.run_module(t, run_name="__main__", alter_sys=True)
-          else:
-              from importlib.metadata import entry_points
-              ep=[x for x in entry_points(group="console_scripts") if x.name==t][0]
-              sys.exit(ep.load()())' "$@"
-          EOF
-          chmod +x AppDir/usr/bin/mo2-lint
-          AppDir/usr/bin/mo2-lint --help || echo "WARNING: --help failed"
+          make -C mo2 -o redirector mo2-lint
+          ls -la mo2/dist
+          file mo2/dist/mo2-lint
 
       - name: Make AppImage
         run: |
           set -e
-          cp -a AppDir AppImageDir
-          echo iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg== | base64 -d > AppImageDir/mo2-lint.png
-          cat > AppImageDir/mo2-lint.desktop <<'EOF'
+          mkdir -p AppDir/usr/bin
+          install -Dm755 mo2/dist/mo2-lint AppDir/usr/bin/mo2-lint
+          echo iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg== | base64 -d > AppDir/mo2-lint.png
+          cat > AppDir/mo2-lint.desktop <<'EOF'
           [Desktop Entry]
           Type=Application
           Name=MO2-LINT
@@ -90,49 +55,24 @@ jobs:
           Terminal=true
           Categories=Game;Utility;
           EOF
-          cat > AppImageDir/AppRun <<'EOF'
+          cat > AppDir/AppRun <<'EOF'
           #!/bin/bash
           HERE="$(dirname "$(readlink -f "$0")")"
           exec "$HERE/usr/bin/mo2-lint" "$@"
           EOF
-          chmod +x AppImageDir/AppRun
+          chmod +x AppDir/AppRun
           curl -L -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-aarch64.AppImage
           chmod +x appimagetool
-          ARCH=aarch64 ./appimagetool --appimage-extract-and-run AppImageDir MO2-LINT-arm64.AppImage
+          ARCH=aarch64 ./appimagetool --appimage-extract-and-run AppDir MO2-LINT-arm64.AppImage
 
       - name: Make Flatpak
         run: |
           set -e
+          cp mo2/dist/mo2-lint ./mo2-lint
           cat > flatpak-mo2lint.yml <<'EOF'
           app-id: local.dev.Mo2Lint
           runtime: org.freedesktop.Platform
           runtime-version: '24.08'
           sdk: org.freedesktop.Sdk
           command: mo2-lint
-          finish-args:
-            - --share=network
-            - --share=ipc
-            - --filesystem=home
-          modules:
-            - name: mo2-lint
-              buildsystem: simple
-              build-commands:
-                - cp -a payload/. /app/
-              sources:
-                - type: dir
-                  path: AppDir/usr
-                  dest: payload
-          EOF
-          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-          flatpak-builder --user --arch=aarch64 --force-clean --disable-rofiles-fuse --install-deps-from=flathub --repo=repo build-dir flatpak-mo2lint.yml
-          flatpak build-bundle --arch=aarch64 --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo repo MO2-LINT-arm64.flatpak local.dev.Mo2Lint
-
-      - name: Check architecture
-        run: file MO2-LINT-arm64.AppImage AppDir/usr/python/bin/python3*
-
-      - uses: softprops/action-gh-release@v2
-        with:
-          tag_name: mo2-lint-arm64
-          files: |
-            MO2-LINT-arm64.AppImage
-            MO2-LINT-arm64.flatpak
+          fin
