@@ -32,26 +32,46 @@ jobs:
           mkdir -p AppDir/usr/bin
           cp -a "$PYROOT" AppDir/usr/python
           uv pip install --python AppDir/usr/python/bin/python3 --break-system-packages ./mo2
-          NAME="$(AppDir/usr/python/bin/python3 - <<'PY'
-          import tomllib
-          d = tomllib.load(open("mo2/pyproject.toml", "rb"))
-          s = d.get("project", {}).get("scripts", {})
-          print("mo2-lint" if "mo2-lint" in s else (next(iter(s)) if s else ""))
-          PY
-          )"
-          test -n "$NAME"
-          echo "Entry point: $NAME"
-          echo "$NAME" > AppDir/usr/entry-name
+          cat > detect.py <<'EOF'
+          import sys
+          from importlib.metadata import distribution
+          d = distribution("modorganizer2-linux-installer")
+          files = list(d.files or [])
+          scripts = [e.name for e in d.entry_points if e.group == "console_scripts"]
+          if scripts:
+              print("script:" + ("mo2-lint" if "mo2-lint" in scripts else scripts[0]))
+              sys.exit(0)
+          tops = sorted({f.parts[0] for f in files if len(f.parts) > 1 and not f.parts[0].endswith((".dist-info", ".data")) and f.parts[0] != "__pycache__"})
+          for t in tops:
+              if any(f.parts[:2] == (t, "__main__.py") for f in files):
+                  print("module:" + t)
+                  sys.exit(0)
+          print("installed top-level dirs: %s" % tops, file=sys.stderr)
+          sys.exit(1)
+          EOF
+          if ! AppDir/usr/python/bin/python3 detect.py > AppDir/usr/entry; then
+            echo "=== Could not find an entry point. Diagnostics: ==="
+            sed -n '1,100p' mo2/pyproject.toml || true
+            ls -la mo2 mo2/src mo2/build || true
+            sed -n '1,80p' mo2/Makefile || true
+            exit 1
+          fi
+          echo "Entry point: $(cat AppDir/usr/entry)"
           cat > AppDir/usr/bin/mo2-lint <<'EOF'
           #!/bin/bash
           ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
-          export MO2_ENTRY="$(cat "$ROOT/entry-name")"
-          exec "$ROOT/python/bin/python3" -c 'import os,sys
-          from importlib.metadata import entry_points
-          n=os.environ["MO2_ENTRY"]
-          ep=[x for x in entry_points(group="console_scripts") if x.name==n][0]
-          sys.argv[0]=n
-          sys.exit(ep.load()())' "$@"
+          MODE="$(cat "$ROOT/entry")"
+          export MO2_KIND="${MODE%%:*}" MO2_TARGET="${MODE#*:}"
+          exec "$ROOT/python/bin/python3" -c 'import os,sys,runpy
+          k=os.environ["MO2_KIND"]
+          t=os.environ["MO2_TARGET"]
+          sys.argv[0]=t
+          if k=="module":
+              runpy.run_module(t, run_name="__main__", alter_sys=True)
+          else:
+              from importlib.metadata import entry_points
+              ep=[x for x in entry_points(group="console_scripts") if x.name==t][0]
+              sys.exit(ep.load()())' "$@"
           EOF
           chmod +x AppDir/usr/bin/mo2-lint
           AppDir/usr/bin/mo2-lint --help || echo "WARNING: --help failed"
