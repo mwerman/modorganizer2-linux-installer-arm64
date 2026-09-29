@@ -75,4 +75,40 @@ jobs:
           runtime-version: '24.08'
           sdk: org.freedesktop.Sdk
           command: mo2-lint
-          fin
+          finish-args:
+            - --share=network
+            - --share=ipc
+            - --filesystem=home
+          modules:
+            - name: mo2-lint
+              buildsystem: simple
+              build-commands:
+                - install -Dm755 mo2-lint /app/bin/mo2-lint
+              sources:
+                - type: file
+                  path: mo2-lint
+          EOF
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak-builder --user --arch=aarch64 --force-clean --disable-rofiles-fuse --install-deps-from=flathub --repo=repo build-dir flatpak-mo2lint.yml
+          flatpak build-bundle --arch=aarch64 --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo repo MO2-LINT-arm64.flatpak local.dev.Mo2Lint
+
+      - name: Show outputs
+        run: ls -la MO2-LINT-arm64.AppImage MO2-LINT-arm64.flatpak
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mo2-lint-arm64
+          path: |
+            MO2-LINT-arm64.AppImage
+            MO2-LINT-arm64.flatpak
+          if-no-files-found: error
+
+      - name: Publish release
+        run: |
+          gh release delete mo2-lint-arm64 --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create mo2-lint-arm64 \
+            MO2-LINT-arm64.AppImage MO2-LINT-arm64.flatpak \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "MO2-LINT arm64 build" \
+            --notes "Unofficial arm64 build"
